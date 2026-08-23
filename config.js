@@ -3,7 +3,7 @@
    ============================================================ */
 
 // Paste the Web App URL you get after deploying the Apps Script (see README.md)
-const WEB_APP_URL = 'https://script.google.com/macros/s/AKfycbywh26_3pjD4Q9FXmSaOqz-C2YTYIfX0vc8Q91hbF8YEDM7dA23ZY3nMom9PQe0SVxnzQ/exec';
+const WEB_APP_URL = 'https://script.google.com/macros/s/AKfycbxjKq6KL4YNpd4waD1FjJOhzhDd0oy82W616TUSu3cwDgpZmmMNaI6esZ6PzC0JVyNzPg/exec';
 
 // Must exactly match ADMIN_PASSWORD in apps-script-code.gs
 const ADMIN_PASSWORD = 'qualitracker2026';
