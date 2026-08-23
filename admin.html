@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>QualiTracker Quiz — Admin</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div id="app"></div>
+<script src="config.js"></script>
+<script>
+let state = {
+  authed: false, passwordInput: "", loginError: null,
+  questions: [], questionsLoading: false,
+  newPrompt: "", newOpts: ["", "", "", ""], newCorrect: 0,
+  bulkText: "", bulkMsg: null,
+  participants: [], participantsLoading: false
+};
+
+function render(){
+  const app = document.getElementById('app');
+  app.innerHTML = '';
+  app.appendChild(state.authed ? renderPanel() : renderGate());
+}
+
+function renderGate(){
+  const wrap = el(`<div>${headerBlock("Question bank & participant management")}</div>`);
+  const card = el(`<div class="card"></div>`);
+  card.appendChild(el(`<label for="adminPass">Admin password</label>`));
+  const input = el(`<input type="password" id="adminPass" placeholder="Enter password" />`);
+  input.addEventListener('input', e => state.passwordInput = e.target.value);
+  input.addEventListener('keydown', e => { if(e.key === 'Enter') tryLogin(); });
+  card.appendChild(input);
+  if(state.loginError) card.appendChild(el(`<div class="feedback bad">${escapeHtml(state.loginError)}</div>`));
+  const btn = el(`<button class="btn btn-primary">Unlock</button>`);
+  btn.addEventListener('click', tryLogin);
+  card.appendChild(btn);
+  wrap.appendChild(card);
+  return wrap;
+}
+
+function tryLogin(){
+  // Client-side gate for convenience; the server independently checks the
+  // same password on every write and on the participant list, so this
+  // alone isn't what protects your data.
+  if(state.passwordInput !== ADMIN_PASSWORD){
+    state.loginError = 'Incorrect password.';
+    render();
+    return;
+  }
+  state.authed = true; state.loginError = null;
+  render();
+  loadQuestions();
+  loadParticipants();
+}
+
+function renderPanel(){
+  const wrap = el(`<div>${headerBlock("Question bank & participant management")}</div>`);
+
+  const summary = el(`<div class="card"><span class="pill">${state.questions.length} question${state.questions.length===1?'':'s'} in pool</span></div>`);
+  const exportBtn = el(`<button class="btn btn-ghost" style="margin-top:12px;width:auto;padding:8px 14px;display:inline-block;">Export participants (CSV)</button>`);
+  exportBtn.addEventListener('click', exportCsv);
+  summary.appendChild(exportBtn);
+  wrap.appendChild(summary);
+
+  // Add single question
+  const addCard = el(`<div class="card"><h3 style="font-size:16px;margin-bottom:10px;">Add a question</h3></div>`);
+  addCard.appendChild(el(`<label>Question</label>`));
+  const promptInput = el(`<textarea id="newPrompt" placeholder="Type the question…"></textarea>`);
+  promptInput.value = state.newPrompt;
+  promptInput.addEventListener('input', e => state.newPrompt = e.target.value);
+  addCard.appendChild(promptInput);
+
+  for(let i=0;i<4;i++){
+    addCard.appendChild(el(`<label>Option ${i+1}${i===state.newCorrect ? ' (correct)' : ''}</label>`));
+    const row = el(`<div style="display:flex;gap:8px;align-items:center;"></div>`);
+    const optInput = el(`<input type="text" placeholder="Answer option ${i+1}" />`);
+    optInput.value = state.newOpts[i];
+    optInput.addEventListener('input', e => state.newOpts[i] = e.target.value);
+    const radio = el(`<input type="radio" name="correctOpt" style="width:20px;height:20px;flex-shrink:0;" ${i===state.newCorrect?'checked':''} />`);
+    radio.addEventListener('change', () => { state.newCorrect = i; });
+    row.appendChild(optInput); row.appendChild(radio);
+    addCard.appendChild(row);
+  }
+  addCard.appendChild(el(`<div class="hint">Select the radio button next to the correct answer.</div>`));
+  const addBtn = el(`<button class="btn btn-primary">Add question</button>`);
+  addBtn.addEventListener('click', addQuestion);
+  addCard.appendChild(addBtn);
+  wrap.appendChild(addCard);
+
+  // Bulk import
+  const bulkCard = el(`<div class="card"><h3 style="font-size:16px;margin-bottom:6px;">Bulk import</h3></div>`);
+  bulkCard.appendChild(el(`<div class="hint">One question per line: <span class="mono">question | option A | option B | option C | option D | correct (0-3)</span></div>`));
+  const bulkArea = el(`<textarea id="bulkArea" placeholder="What does QMS stand for? | Quality Metrics System | Quality Management System | Quick Measurement Sheet | Quality Manual Series | 1" style="margin-top:10px;min-height:120px;"></textarea>`);
+  bulkArea.value = state.bulkText;
+  bulkArea.addEventListener('input', e => state.bulkText = e.target.value);
+  bulkCard.appendChild(bulkArea);
+  if(state.bulkMsg) bulkCard.appendChild(el(`<div class="feedback ${state.bulkMsg.ok ? 'good' : 'bad'}">${escapeHtml(state.bulkMsg.text)}</div>`));
+  const bulkBtn = el(`<button class="btn btn-primary">Import lines</button>`);
+  bulkBtn.addEventListener('click', bulkImport);
+  bulkCard.appendChild(bulkBtn);
+  wrap.appendChild(bulkCard);
+
+  // Participants
+  wrap.appendChild(el(`<hr class="divider" />`));
+  const partTitleRow = el(`<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;"></div>`);
+  partTitleRow.appendChild(el(`<h3 style="font-size:16px;">Registered participants</h3>`));
+  const partRefreshBtn = el(`<button class="btn btn-ghost" style="margin-top:0;width:auto;padding:6px 12px;font-size:12px;">Refresh</button>`);
+  partRefreshBtn.addEventListener('click', loadParticipants);
+  partTitleRow.appendChild(partRefreshBtn);
+  wrap.appendChild(partTitleRow);
+
+  if(state.participantsLoading){
+    wrap.appendChild(el(`<div class="loading-note">Loading participants…</div>`));
+  } else if(state.participants.length === 0){
+    wrap.appendChild(el(`<div class="empty-note">No one has registered yet.</div>`));
+  } else {
+    const doneCount = state.participants.filter(p => p.Completed === true || p.Completed === 'TRUE').length;
+    wrap.appendChild(el(`<div class="hint" style="margin-bottom:10px;">${state.participants.length} registered · ${doneCount} completed</div>`));
+    state.participants.forEach(p => {
+      const completed = p.Completed === true || p.Completed === 'TRUE';
+      wrap.appendChild(el(`
+        <div class="part-row">
+          <div class="part-main">
+            <div class="part-name">${escapeHtml(p.Name)}</div>
+            <div class="part-sub">${escapeHtml(p.Facility)} · ${escapeHtml(p.Region)}${completed ? ' · Score: ' + p.Score : ''}</div>
+          </div>
+          <div class="part-pin">${escapeHtml(p.PIN)}</div>
+          <span class="pill ${completed ? 'pill-done' : 'pill-pending'}">${completed ? 'Completed' : 'Not yet'}</span>
+        </div>`));
+    });
+  }
+
+  // Question list
+  wrap.appendChild(el(`<hr class="divider" />`));
+  wrap.appendChild(el(`<h3 style="font-size:16px;margin-bottom:10px;">Current pool</h3>`));
+  if(state.questionsLoading){
+    wrap.appendChild(el(`<div class="loading-note">Loading…</div>`));
+  } else if(state.questions.length === 0){
+    wrap.appendChild(el(`<div class="empty-note">No questions yet — add some above.</div>`));
+  } else {
+    state.questions.forEach((q, idx) => {
+      const qCard = el(`<div class="admin-q"></div>`);
+      qCard.appendChild(el(`<div class="aq-prompt">${idx+1}. ${escapeHtml(q.prompt)}</div>`));
+      const optsList = q.options.map((o,i) => `<span class="${i===q.correctIndex?'aq-correct':''}">${i===q.correctIndex?'✓ ':''}${escapeHtml(o)}</span>`).join(' · ');
+      qCard.appendChild(el(`<div class="aq-opts">${optsList}</div>`));
+      const foot = el(`<div class="admin-q-foot"></div>`);
+      const delBtn = el(`<button class="btn btn-danger">Delete</button>`);
+      delBtn.addEventListener('click', () => deleteQuestion(q.id));
+      foot.appendChild(delBtn);
+      qCard.appendChild(foot);
+      wrap.appendChild(qCard);
+    });
+  }
+
+  return wrap;
+}
+
+async function loadQuestions(){
+  state.questionsLoading = true; render();
+  try {
+    const q = await apiGet('questions');
+    state.questions = Array.isArray(q) ? q : [];
+  } catch(e){ console.error('Failed to load question bank', e); state.questions = []; }
+  finally { state.questionsLoading = false; render(); }
+}
+
+async function loadParticipants(){
+  state.participantsLoading = true; render();
+  try {
+    const res = await apiGet('adminParticipants', { password: ADMIN_PASSWORD });
+    if(res && res.error){ state.participants = []; }
+    else state.participants = Array.isArray(res) ? res.sort((a,b) => (a.Name||'').localeCompare(b.Name||'')) : [];
+  } catch(e){ console.error('Failed to load participants', e); state.participants = []; }
+  finally { state.participantsLoading = false; render(); }
+}
+
+async function addQuestion(){
+  const prompt = state.newPrompt.trim();
+  const opts = state.newOpts.map(o => o.trim());
+  if(!prompt || opts.some(o => !o)){ alert('Please fill in the question and all four options.'); return; }
+  try {
+    await apiPost({ action: 'addQuestion', adminPassword: ADMIN_PASSWORD, prompt, options: opts, correctIndex: state.newCorrect });
+    state.newPrompt = ""; state.newOpts = ["", "", "", ""]; state.newCorrect = 0;
+    loadQuestions();
+  } catch(e){ console.error('Add question failed', e); alert('Could not add the question — check your connection and try again.'); }
+}
+
+async function bulkImport(){
+  const lines = state.bulkText.split('\n').map(l => l.trim()).filter(Boolean);
+  const parsed = []; let skipped = 0;
+  lines.forEach(line => {
+    const parts = line.split('|').map(p => p.trim());
+    if(parts.length !== 6){ skipped++; return; }
+    const [prompt, a, b, c, d, correctStr] = parts;
+    const correctIndex = parseInt(correctStr, 10);
+    if(!prompt || !a || !b || !c || !d || isNaN(correctIndex) || correctIndex < 0 || correctIndex > 3){ skipped++; return; }
+    parsed.push({ prompt, options: [a,b,c,d], correctIndex });
+  });
+  if(parsed.length === 0){
+    state.bulkMsg = { ok: false, text: `No valid lines found${skipped ? ` (${skipped} malformed)` : ''}.` };
+    render(); return;
+  }
+  try {
+    const res = await apiPost({ action: 'bulkAddQuestions', adminPassword: ADMIN_PASSWORD, questions: parsed });
+    state.bulkMsg = { ok: skipped === 0, text: `Added ${res.added || parsed.length} question${(res.added||parsed.length)===1?'':'s'}${skipped ? `, skipped ${skipped} malformed line${skipped===1?'':'s'}` : ''}.` };
+    state.bulkText = "";
+    loadQuestions();
+  } catch(e){
+    console.error('Bulk import failed', e);
+    state.bulkMsg = { ok: false, text: 'Import failed — check your connection and try again.' };
+    render();
+  }
+}
+
+async function deleteQuestion(id){
+  if(!confirm('Delete this question?')) return;
+  try {
+    await apiPost({ action: 'deleteQuestion', adminPassword: ADMIN_PASSWORD, id });
+    loadQuestions();
+  } catch(e){ console.error('Delete failed', e); alert('Could not delete — check your connection and try again.'); }
+}
+
+function exportCsv(){
+  const header = ['Name','Region','District','Facility','PIN','Completed','Score','CorrectCount','TotalQuestions','RegisteredAt','CompletedAt'];
+  const csvLines = [header.join(',')];
+  state.participants.forEach(p => {
+    const completed = p.Completed === true || p.Completed === 'TRUE';
+    const line = [p.Name, p.Region, p.District, p.Facility, p.PIN, completed ? 'Yes' : 'No', p.Score, p.CorrectCount, p.TotalQuestions, p.RegisteredAt, p.CompletedAt]
+      .map(v => `"${String(v==null?'':v).replace(/"/g,'""')}"`).join(',');
+    csvLines.push(line);
+  });
+  const blob = new Blob([csvLines.join('\n')], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'qualitracker-quiz-participants.csv';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+render();
+</script>
+</body>
+</html>

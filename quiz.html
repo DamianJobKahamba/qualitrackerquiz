@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>QualiTracker Quiz — Take the quiz</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div id="app"></div>
+<script src="config.js"></script>
+<script>
+let state = {
+  screen: 'login',
+  participants: [], participantsLoading: true, loginError: null,
+  selectedId: "", pinInput: "",
+  currentParticipant: null,
+  qIndex: 0, score: 0, correctCount: 0, timeLeft: QUESTION_SECONDS, timerId: null, locked: false,
+  quizQuestions: []
+};
+
+function render(){
+  const app = document.getElementById('app');
+  app.innerHTML = '';
+  if(state.screen === 'login') app.appendChild(renderLogin());
+  else if(state.screen === 'playing') app.appendChild(renderPlaying());
+  else if(state.screen === 'results') app.appendChild(renderResults());
+}
+
+function renderLogin(){
+  const wrap = el(`<div>${headerBlock("Log in with your name and PIN to begin.")}</div>`);
+  const card = el(`<div class="card"></div>`);
+
+  if(state.participantsLoading){
+    card.appendChild(el(`<div class="loading-note">Loading registered participants…</div>`));
+    wrap.appendChild(card);
+    return wrap;
+  }
+
+  card.appendChild(el(`<label for="quizName">Your name</label>`));
+  const sel = el(`<select id="quizName"></select>`);
+  sel.appendChild(el(`<option value="">Select your name…</option>`));
+  const sorted = [...state.participants].sort((a,b) => a.name.localeCompare(b.name));
+  sorted.forEach(p => sel.appendChild(el(`<option value="${p.id}">${escapeHtml(p.name)} — ${escapeHtml(p.facility)}</option>`)));
+  sel.value = state.selectedId;
+  sel.addEventListener('change', e => { state.selectedId = e.target.value; });
+  card.appendChild(sel);
+
+  card.appendChild(el(`<label for="quizPin">PIN</label>`));
+  const pinInput = el(`<input type="text" id="quizPin" class="pin-input" maxlength="8" placeholder="••••••" autocomplete="off" />`);
+  pinInput.value = state.pinInput;
+  pinInput.addEventListener('input', e => { state.pinInput = e.target.value.toUpperCase(); e.target.value = state.pinInput; });
+  card.appendChild(pinInput);
+
+  if(state.loginError) card.appendChild(el(`<div class="feedback bad">${escapeHtml(state.loginError)}</div>`));
+
+  const goBtn = el(`<button class="btn btn-primary">Start quiz</button>`);
+  goBtn.addEventListener('click', attemptLogin);
+  card.appendChild(goBtn);
+  wrap.appendChild(card);
+
+  const linkRow = el(`<div class="link-row"><a id="toRegister">Not registered yet? Register here →</a></div>`);
+  linkRow.querySelector('a').addEventListener('click', () => { window.location.href = 'index.html'; });
+  wrap.appendChild(linkRow);
+
+  return wrap;
+}
+
+async function loadParticipants(){
+  state.participantsLoading = true; render();
+  try {
+    const list = await apiGet('participantNames');
+    state.participants = Array.isArray(list) ? list : [];
+  } catch(err){ console.error('Failed to load participants', err); state.participants = []; }
+  finally { state.participantsLoading = false; render(); }
+}
+
+async function attemptLogin(){
+  state.loginError = null;
+  if(!state.selectedId){ state.loginError = 'Please select your name.'; render(); return; }
+  const btn = document.querySelector('.btn-primary');
+  if(btn){ btn.disabled = true; btn.textContent = 'Checking…'; }
+  try {
+    const res = await apiPost({ action: 'login', id: state.selectedId, pin: state.pinInput.trim() });
+    if(!res.ok){
+      state.loginError = res.error || 'Login failed.';
+      render();
+      return;
+    }
+    startQuiz(res.participant);
+  } catch(err){
+    console.error('Login failed', err);
+    state.loginError = 'Could not reach the server — check your connection and try again.';
+    render();
+  }
+}
+
+async function startQuiz(participant){
+  state.currentParticipant = participant;
+  let pool = [];
+  try { pool = await apiGet('questions'); } catch(e){ pool = []; }
+  if(!Array.isArray(pool) || pool.length === 0){
+    alert('No questions are set up yet. Ask the organizer to add questions via admin.html.');
+    return;
+  }
+
+  const picked = shuffle(pool).slice(0, Math.min(QUIZ_LENGTH, pool.length));
+  state.quizQuestions = picked.map(q => {
+    const optOrder = shuffle(q.options.map((opt, i) => ({ opt, i })));
+    return { prompt: q.prompt, options: optOrder.map(o => o.opt), correctIndex: optOrder.findIndex(o => o.i === q.correctIndex) };
+  });
+
+  state.qIndex = 0; state.score = 0; state.correctCount = 0;
+  state.screen = 'playing';
+  render();
+  beginQuestionTimer();
+}
+
+function renderPlaying(){
+  const q = state.quizQuestions[state.qIndex];
+  const wrap = el(`<div></div>`);
+  const top = el(`
+    <div class="quiz-top">
+      <div class="qcount">Question ${state.qIndex + 1} of ${state.quizQuestions.length}</div>
+      <div class="ring-wrap">
+        <svg width="54" height="54" viewBox="0 0 54 54">
+          <circle class="ring-bg" cx="27" cy="27" r="22"></circle>
+          <circle class="ring-fg" id="ringFg" cx="27" cy="27" r="22" stroke-dasharray="138.2" stroke-dashoffset="0"></circle>
+        </svg>
+        <div class="ring-num" id="ringNum">${state.timeLeft}</div>
+      </div>
+    </div>`);
+  wrap.appendChild(top);
+
+  const card = el(`<div class="card"></div>`);
+  card.appendChild(el(`<div class="qtext">${escapeHtml(q.prompt)}</div>`));
+  q.options.forEach((opt, i) => {
+    const b = el(`<button class="opt opt-${i}" data-i="${i}">${escapeHtml(opt)}</button>`);
+    b.addEventListener('click', () => selectAnswer(i));
+    card.appendChild(b);
+  });
+  card.appendChild(el(`<div class="feedback" id="feedbackMsg"></div>`));
+  wrap.appendChild(card);
+  return wrap;
+}
+
+function beginQuestionTimer(){
+  clearInterval(state.timerId);
+  state.timeLeft = QUESTION_SECONDS;
+  state.locked = false;
+  updateRing();
+  state.timerId = setInterval(() => {
+    state.timeLeft -= 1;
+    if(state.timeLeft <= 0){
+      state.timeLeft = 0; updateRing(); clearInterval(state.timerId);
+      if(!state.locked) selectAnswer(-1);
+      return;
+    }
+    updateRing();
+  }, 1000);
+}
+
+function updateRing(){
+  const num = document.getElementById('ringNum');
+  const ring = document.getElementById('ringFg');
+  if(!num || !ring) return;
+  num.textContent = state.timeLeft;
+  const frac = state.timeLeft / QUESTION_SECONDS;
+  ring.style.strokeDashoffset = String(138.2 * (1 - frac));
+  ring.style.stroke = frac <= 0.25 ? '#C4432B' : '#E8A93A';
+}
+
+function selectAnswer(choiceIndex){
+  if(state.locked) return;
+  state.locked = true;
+  clearInterval(state.timerId);
+  const q = state.quizQuestions[state.qIndex];
+  const buttons = document.querySelectorAll('.opt');
+  const fb = document.getElementById('feedbackMsg');
+  const isCorrect = choiceIndex === q.correctIndex;
+
+  buttons.forEach((b, i) => {
+    b.disabled = true;
+    if(i === q.correctIndex) b.classList.add('correct');
+    else if(i === choiceIndex) b.classList.add('incorrect');
+    else b.classList.add('dim');
+  });
+
+  if(isCorrect){
+    const points = 500 + Math.round(500 * (state.timeLeft / QUESTION_SECONDS));
+    state.score += points; state.correctCount += 1;
+    if(fb){ fb.textContent = `Correct! +${points} points`; fb.className = 'feedback good'; }
+  } else {
+    if(fb){ fb.textContent = choiceIndex === -1 ? "Time's up — 0 points" : 'Not quite — 0 points'; fb.className = 'feedback bad'; }
+  }
+
+  setTimeout(() => {
+    if(state.qIndex < state.quizQuestions.length - 1){ state.qIndex += 1; render(); beginQuestionTimer(); }
+    else finishQuiz();
+  }, 1200);
+}
+
+async function finishQuiz(){
+  state.screen = 'results';
+  render();
+  try {
+    await apiPost({
+      action: 'submitResult', id: state.currentParticipant.id,
+      score: state.score, correctCount: state.correctCount, totalQuestions: state.quizQuestions.length
+    });
+  } catch(err){ console.error('Failed to save result', err); }
+}
+
+function renderResults(){
+  const wrap = el(`<div>${headerBlock("Nice work — here's how you did.")}</div>`);
+  const card = el(`
+    <div class="card">
+      <div class="score-hero">
+        <div class="cap">Your score</div>
+        <div class="big mono">${state.score}</div>
+      </div>
+      <div class="stat-row">
+        <div class="stat"><div class="n">${state.correctCount}/${state.quizQuestions.length}</div><div class="l">Correct</div></div>
+        <div class="stat"><div class="n">${escapeHtml(state.currentParticipant.region)}</div><div class="l">Region</div></div>
+      </div>
+    </div>`);
+  wrap.appendChild(card);
+
+  const nav = el(`<div class="footer-nav"></div>`);
+  const lbBtn = el(`<button class="btn btn-primary">View leaderboard</button>`);
+  lbBtn.addEventListener('click', () => { window.location.href = 'leaderboard.html'; });
+  nav.appendChild(lbBtn);
+  wrap.appendChild(nav);
+  return wrap;
+}
+
+render();
+loadParticipants();
+</script>
+</body>
+</html>
